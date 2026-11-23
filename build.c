@@ -345,6 +345,25 @@ bool build_case(Arena *ar, CaseInput *c, Arena *out) {
     /* markdown: render each page's body, links resolved against the kept
      * pages (by source path) and the statics. */
     PROF_MARK(last, "frontmatter");
+    /* path hash table for O(1) link resolution (pages + statics). */
+    size_t ph_n = 1024;
+    while (ph_n < 2 * (pages.len + statics.len)) ph_n <<= 1;
+    uint32_t *path_hash = ar_alloc(ar, ph_n * sizeof(uint32_t));
+    xmemset(path_hash, 0, ph_n * sizeof(uint32_t));
+    for (size_t i = 0; i < pages.len; i++) {
+        PageD *pg = vec_at(&pages, i);
+        uint64_t h = fnv1a_bytes(ar_get(ar, pg->path), pg->path.len);
+        size_t slot = (size_t)h & (ph_n - 1);
+        while (path_hash[slot]) slot = (slot + 1) & (ph_n - 1);
+        path_hash[slot] = (uint32_t)(i + 1);
+    }
+    for (size_t j = 0; j < statics.len; j++) {
+        SPair *sp = vec_at(&statics, j);
+        uint64_t h = fnv1a_bytes(ar_get(ar, sp->a), sp->a.len);
+        size_t slot = (size_t)h & (ph_n - 1);
+        while (path_hash[slot]) slot = (slot + 1) & (ph_n - 1);
+        path_hash[slot] = 0x80000000u | (uint32_t)(j + 1);
+    }
     Vec broken; vec_init(&broken, sizeof(S));
     Vec toc_store; vec_init(&toc_store, sizeof(TocD));
     Vec toc_arrays; vec_init(&toc_arrays, sizeof(Range));
@@ -369,6 +388,8 @@ bool build_case(Arena *ar, CaseInput *c, Arena *out) {
         env.path_buf = &path_buf;
         env.item_buf = &item_buf;
         env.item_scratch = &item_scratch;
+        env.path_hash = path_hash;
+        env.path_hash_mask = ph_n - 1;
         S html, excerpt;
         Vec toc; vec_init(&toc, sizeof(TocD));
         md_render(ar, pd->body, &env, &md_slug_cache, &scratch, &tmp, &text_tmp, &html, &toc, &excerpt);
@@ -796,6 +817,24 @@ bool run_all(Arena *ar, const uint8_t *input, size_t n, Arena *out) {
     extern void prof_tpl_print(void);
     prof_md_print();
     prof_tpl_print();
+    {
+        uint8_t b7[96]; size_t m = 0;
+        const char *a = "outseg n=";
+        while (*a) b7[m++] = (uint8_t)*a++;
+        long vv = (long)tpl_outseg_count(); char tmp[20]; int i = 20;
+        if (vv == 0) b7[m++] = '0';
+        else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b7[m++] = (uint8_t)tmp[i++]; }
+        b7[m++] = ' ';
+        a = "bytes=";
+        while (*a) b7[m++] = (uint8_t)*a++;
+        long tot = 0; const OutSeg *sg = tpl_outseg_list();
+        for (size_t q = 0; q < tpl_outseg_count(); q++) tot += (long)sg[q].span.len;
+        vv = tot; i = 20;
+        if (vv == 0) b7[m++] = '0';
+        else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b7[m++] = (uint8_t)tmp[i++]; }
+        b7[m++] = '\n';
+        sys_write(2, b7, (long)m);
+    }
 #endif
     return true;
 }

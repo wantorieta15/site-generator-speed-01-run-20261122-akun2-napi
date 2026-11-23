@@ -4,8 +4,11 @@
 
 #ifdef SG_PROFILE
 static long md_inline_ns, md_block_ns;
-long prof_link_ns, prof_link_n;
+long prof_link_ns, prof_link_n, prof_link_distinct;
 long prof_bracket_ns, prof_bracket_n, prof_bracket_link_n;
+long prof_star_ns, prof_star_n, prof_tick_ns, prof_tick_n;
+long prof_star_clean, prof_star_dirty;
+long prof_link_clean, prof_link_dirty;
 long prof_in_star, prof_in_star2, prof_in_tick, prof_in_esc, prof_in_bs, prof_in_calls;
 long prof_in_span_bytes;
 long prof_words_ns;
@@ -46,6 +49,11 @@ void prof_md_print(void) {
         const char *c = "n=";
         while (*c) b2[m++] = (uint8_t)*c++;
         v = prof_link_n; i = 20;
+        if (v == 0) b2[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b2[m++] = (uint8_t)tmp[i++]; }
+        const char *dd = " distinct=";
+        while (*dd) b2[m++] = (uint8_t)*dd++;
+        v = prof_link_distinct; i = 20;
         if (v == 0) b2[m++] = '0';
         else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b2[m++] = (uint8_t)tmp[i++]; }
         b2[m++] = '\n';
@@ -94,6 +102,59 @@ void prof_md_print(void) {
         else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b3[m++] = (uint8_t)tmp[i++]; }
         b3[m++] = 'm'; b3[m++] = 's'; b3[m++] = '\n';
         sys_write(2, b3, (long)m);
+    }
+    {
+        /* star / tick timers */
+        uint8_t b4[128]; size_t m = 0;
+        const char *a = "starT: ";
+        while (*a) b4[m++] = (uint8_t)*a++;
+        long v = prof_star_ns / 1000000; char tmp[20]; int i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = 'm'; b4[m++] = 's'; b4[m++] = ' ';
+        const char *c = "n=";
+        while (*c) b4[m++] = (uint8_t)*c++;
+        v = prof_star_n; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = ' ';
+        const char *d = "tickT: ";
+        while (*d) b4[m++] = (uint8_t)*d++;
+        v = prof_tick_ns / 1000000; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = 'm'; b4[m++] = 's'; b4[m++] = ' ';
+        const char *e = "n=";
+        while (*e) b4[m++] = (uint8_t)*e++;
+        v = prof_tick_n; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = ' ';
+        const char *g = "clean=";
+        while (*g) b4[m++] = (uint8_t)*g++;
+        v = prof_star_clean; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = ' ';
+        const char *h = "dirty=";
+        while (*h) b4[m++] = (uint8_t)*h++;
+        v = prof_star_dirty; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = ' ';
+        const char *lc = "linkClean=";
+        while (*lc) b4[m++] = (uint8_t)*lc++;
+        v = prof_link_clean; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = ' ';
+        const char *ld = "linkDirty=";
+        while (*ld) b4[m++] = (uint8_t)*ld++;
+        v = prof_link_dirty; i = 20;
+        if (v == 0) b4[m++] = '0';
+        else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+        b4[m++] = '\n';
+        sys_write(2, b4, (long)m);
     }
 }
 #endif
@@ -166,12 +227,20 @@ static bool is_hr(Arena *ar, size_t off, size_t end) {
     return true;
 }
 
+/* First-byte dispatch: only the constructs that can start with this byte
+ * are tested. A plain text line (letter/digit/etc.) can end a paragraph
+ * in no way, so it returns false without any call. */
 static bool ends_paragraph(Arena *ar, size_t off, size_t end) {
+    if (off >= end) return true;
+    uint8_t c = ar->buf[off];
     size_t d, t, l;
-    return is_blank(ar, off, end)
-        || fence_open(ar, off, end, &t, &l)
-        || heading_of(ar, off, end, &d, &t, &l)
-        || is_hr(ar, off, end);
+    switch (c) {
+        case '#': return heading_of(ar, off, end, &d, &t, &l);
+        case '`': return fence_open(ar, off, end, &t, &l);
+        case '-': case '*': return is_hr(ar, off, end);
+        case ' ': case '\t': return is_blank(ar, off, end);
+        default: return false;
+    }
 }
 
 /* A list item's start: bullet or ordered. Returns text span in a Buf. */
@@ -207,21 +276,28 @@ static bool is_continued(Arena *ar, size_t off, size_t end) {
     return !(c == ' ' || c == '\t' || c == '\n' || c == 0x0b || c == 0x0c || c == '\r');
 }
 
+/* Write HTML-escaped bytes to a Buf through a raw cursor: one reserve
+ * up front, then direct stores (no buf_puts call per chunk/entity).
+ * Byte-identical to the old find_html_special_sse + buf_puts loop. */
 static void write_esc_html_bytes(const uint8_t *b, size_t n, Buf *out) {
+    buf_reserve(out, out->len + 6 * n + 16);
+    uint8_t *wp = out->p + out->len;
     size_t i = 0;
     while (i < n) {
         int j = find_html_special_sse(b, n, i);
-        if (j < 0) { buf_puts(out, b + i, n - i); return; }
-        buf_puts(out, b + i, (size_t)j - i);
+        if (j < 0) { xmemcpy(wp, b + i, n - i); wp += n - i; break; }
+        size_t chunk = (size_t)j - i;
+        xmemcpy(wp, b + i, chunk); wp += chunk;
         switch (b[j]) {
-            case '&': buf_puts(out, (const uint8_t *)"&amp;", 5); break;
-            case '<': buf_puts(out, (const uint8_t *)"&lt;", 4); break;
-            case '>': buf_puts(out, (const uint8_t *)"&gt;", 4); break;
-            case '"': buf_puts(out, (const uint8_t *)"&quot;", 6); break;
-            default: buf_puts(out, (const uint8_t *)"&#39;", 5); break;
+            case '&': wp[0]='&'; wp[1]='a'; wp[2]='m'; wp[3]='p'; wp[4]=';'; wp += 5; break;
+            case '<': wp[0]='&'; wp[1]='l'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+            case '>': wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+            case '"': wp[0]='&'; wp[1]='q'; wp[2]='u'; wp[3]='o'; wp[4]='t'; wp[5]=';'; wp += 6; break;
+            default: wp[0]='&'; wp[1]='#'; wp[2]='3'; wp[3]='9'; wp[4]=';'; wp += 5; break;
         }
         i = (size_t)j + 1;
     }
+    out->len = (size_t)(wp - out->p);
 }
 
 /* ---------------- inline ---------------- */
@@ -270,6 +346,44 @@ static int find_single_star(const uint8_t *s, size_t n, size_t from) {
     }
 }
 
+/* Find the closing emphasis delimiter at or after `from` (dbl=1 looks for
+ * `**`, dbl=0 for a single `*`), mirroring find_single_star /
+ * find_unescaped exactly (backslash escapes skipped, `**` pairs skipped
+ * when seeking a single `*`, single `*` skipped when seeking `**`).
+ * Sets *clean=1 when the span before the closer holds no other inline
+ * special (none of \ ` [ * & < > " '), so the caller can copy the span
+ * verbatim instead of recursing into inline_bytes_inner: a special-free
+ * span renders byte-for-byte. Any other special (including an escape or
+ * a nested delimiter) sets *clean=0 and the caller recurses as before. */
+static int find_em_close(const uint8_t *s, size_t n, size_t from, int dbl, int *clean) {
+    static const uint8_t needles[] = {'\\', '`', '[', '*', '&', '<', '>', '"', '\''};
+    *clean = 1;
+    size_t pos = from;
+    for (;;) {
+        int j = find_any_sse(s, n, pos, needles, 9);
+        if (j < 0) return -1;
+        uint8_t c = s[j];
+        if (c == '\\') {
+            *clean = 0;
+            if ((size_t)j + 1 < n && is_escapable(s[j+1])) pos = (size_t)j + 2;
+            else pos = (size_t)j + 1;
+            continue;
+        }
+        if (c == '*') {
+            if (dbl) {
+                if ((size_t)j + 1 < n && s[j+1] == '*') return j;
+                *clean = 0;
+                pos = (size_t)j + 1;
+                continue;
+            }
+            if ((size_t)j + 1 < n && s[j+1] == '*') { *clean = 0; pos = (size_t)j + 2; continue; }
+            return j;
+        }
+        *clean = 0;
+        pos = (size_t)j + 1;
+    }
+}
+
 static bool has_ws(const uint8_t *s, size_t n) {
     size_t i = 0;
     while (i < n) {
@@ -300,30 +414,30 @@ static bool is_scheme(const uint8_t *t, size_t n) {
     return i < n && t[i] == ':';
 }
 
-static int page_idx_of(LinkEnv *env, Arena *ar, const uint8_t *path, size_t n) {
-    size_t lo = 0, hi = env->npages;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        PageD *p = &env->pages[mid];
-        int c = utf16_cmp(ar_get(ar, p->path), p->path.len, path, n);
-        if (c < 0) lo = mid + 1;
-        else if (c > 0) hi = mid;
-        else return (int)mid;
+/* O(1) path lookup over the per-case hash table (pages + statics).
+ * Returns 0 = miss, >0 = page index+1, <0 = -(static index+1).
+ * Byte equality is exact: utf16_cmp==0 iff the UTF-8 bytes are equal
+ * (UTF-8 is a unique encoding per code point). */
+static inline int32_t path_lookup(LinkEnv *env, Arena *ar, const uint8_t *path, size_t n) {
+    uint64_t h = fnv1a_bytes(path, n);
+    size_t mask = env->path_hash_mask;
+    size_t slot = (size_t)h & mask;
+    for (;;) {
+        uint32_t v = env->path_hash[slot];
+        if (v == 0) return 0;
+        const uint8_t *kp; size_t kn;
+        if (v & 0x80000000u) {
+            SPair *sp = &env->statics[(v & 0x7fffffffu) - 1];
+            kp = ar_get(ar, sp->a); kn = sp->a.len;
+        } else {
+            PageD *pg = &env->pages[v - 1];
+            kp = ar_get(ar, pg->path); kn = pg->path.len;
+        }
+        if (kn == n && xmemcmp(kp, path, n) == 0) {
+            return (v & 0x80000000u) ? -(int32_t)(v & 0x7fffffffu) : (int32_t)v;
+        }
+        slot = (slot + 1) & mask;
     }
-    return -1;
-}
-
-static bool is_static_of(LinkEnv *env, Arena *ar, const uint8_t *path, size_t n) {
-    size_t lo = 0, hi = env->nstatics;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        SPair *s = &env->statics[mid];
-        int c = utf16_cmp(ar_get(ar, s->a), s->a.len, path, n);
-        if (c < 0) lo = mid + 1;
-        else if (c > 0) hi = mid;
-        else return true;
-    }
-    return false;
 }
 
 /* resolvePath(dir, rel) into out; false when it climbs out of the root. */
@@ -366,6 +480,46 @@ static bool resolve_path(Arena *ar, S dir, const uint8_t *rel, size_t rn, Buf *o
     return true;
 }
 
+/* resolvePath(dir, rel) into out; same result as resolve_path, but the
+ * dir is pre-split once per page (env->dir_parts) and the join writes
+ * directly into path_buf with one reserve. Falls back to resolve_path
+ * when the dir did not fit the pre-split table. */
+static bool resolve_path_fast(LinkEnv *env, Arena *ar, const uint8_t *rel, size_t rn, Buf *out) {
+    if (!env->dir_parts_ok) return resolve_path(ar, env->dir, rel, rn, out);
+    const uint8_t *parts[64];
+    size_t plens[64];
+    size_t np = env->ndir_parts;
+    for (size_t k = 0; k < np; k++) { parts[k] = env->dir_parts[k]; plens[k] = env->dir_plens[k]; }
+    size_t s = 0;
+    for (size_t i = 0; i <= rn; i++) {
+        if (i == rn || rel[i] == '/') {
+            size_t sl = i - s;
+            const uint8_t *seg = rel + s;
+            s = i + 1;
+            if (sl == 0 || (sl == 1 && seg[0] == '.')) continue;
+            if (sl == 2 && seg[0] == '.' && seg[1] == '.') {
+                if (np == 0) return false;
+                np--;
+            } else {
+                if (np < 64) { parts[np] = seg; plens[np] = sl; np++; }
+                else return false;
+            }
+        }
+    }
+    size_t total = 0;
+    for (size_t k = 0; k < np; k++) total += plens[k] + (k > 0 ? 1 : 0);
+    buf_clear(out);
+    buf_reserve(out, total);
+    uint8_t *wp = out->p;
+    for (size_t k = 0; k < np; k++) {
+        if (k > 0) *wp++ = '/';
+        xmemcpy(wp, parts[k], plens[k]); wp += plens[k];
+    }
+    out->len = (size_t)(wp - out->p);
+    return true;
+}
+
+/* ---- link target resolution ---- */
 static void record_broken(Arena *ar, LinkEnv *env, const uint8_t *target, size_t tn) {
     uint32_t st = ar_begin(ar);
     ar_push_slice(ar, (const uint8_t *)"broken-link ", 12);
@@ -379,6 +533,25 @@ static void record_broken(Arena *ar, LinkEnv *env, const uint8_t *target, size_t
 
 static const uint8_t *resolve_link_inner(Arena *ar, LinkEnv *env, const uint8_t *target, size_t tn,
                                    Buf *tmp, size_t *href_len) {
+#ifdef SG_PROFILE
+    /* Distinct (dir,target) counter: FNV-1a over dir bytes + target bytes
+     * into a 64k open-addressing set. Tells us the memoization headroom. */
+    static uint64_t link_seen[65536];
+    static long link_calls, link_distinct;
+    {
+        uint64_t h = 1469598103934665603ULL;
+        const uint8_t *db = ar_get(ar, env->dir);
+        for (size_t i = 0; i < env->dir.len; i++) { h ^= db[i]; h *= 1099511628211ULL; }
+        h ^= 0xff; h *= 1099511628211ULL;
+        for (size_t i = 0; i < tn; i++) { h ^= target[i]; h *= 1099511628211ULL; }
+        if (h == 0) h = 1;
+        size_t slot = (size_t)h & 65535;
+        while (link_seen[slot] != 0 && link_seen[slot] != h) slot = (slot + 1) & 65535;
+        if (link_seen[slot] == 0) { link_seen[slot] = h; link_distinct++; }
+        link_calls++;
+        prof_link_distinct = link_distinct;
+    }
+#endif
     if ((tn > 0 && target[0] == '/') || (tn > 0 && target[0] == '#') || is_scheme(target, tn)) {
         buf_clear(tmp);
         buf_puts(tmp, target, tn);
@@ -397,18 +570,18 @@ static const uint8_t *resolve_link_inner(Arena *ar, LinkEnv *env, const uint8_t 
         return tmp->p;
     }
     Buf *path_buf = env->path_buf;
-    bool ok = resolve_path(ar, env->dir, target, rl, path_buf);
+    bool ok = resolve_path_fast(env, ar, target, rl, path_buf);
     if (ok) {
-        int idx = page_idx_of(env, ar, path_buf->p, path_buf->len);
-        if (idx >= 0) {
-            PageD *pg = &env->pages[idx];
+        int32_t lk = path_lookup(env, ar, path_buf->p, path_buf->len);
+        if (lk > 0) {
+            PageD *pg = &env->pages[lk - 1];
             buf_clear(tmp);
             buf_puts(tmp, ar_get(ar, pg->url), pg->url.len);
             buf_puts(tmp, frag, fl);
             *href_len = tmp->len;
             return tmp->p;
         }
-        if (is_static_of(env, ar, path_buf->p, path_buf->len)) {
+        if (lk < 0) {
             buf_clear(tmp);
             buf_puts(tmp, ar_get(ar, env->base), env->base.len);
             buf_put(tmp, '/');
@@ -438,11 +611,302 @@ static const uint8_t *resolve_link(Arena *ar, LinkEnv *env, const uint8_t *targe
 #define resolve_link resolve_link_inner
 #endif
 
+/* ---- fused inline engine (ronde 7) ----
+ * Same algorithm and byte-identical output as the old find_em_close /
+ * find_unescaped / inline_bytes_inner trio, but fused into one chunk
+ * loop with no helper call per event: the 9 needle vectors are hoisted
+ * once per call, the next-special scan is inlined (__builtin_ctz
+ * replaces the old shift-loop bit scan), the emphasis-closer and
+ * bracket scans share the same mask pass, and the link-text clean
+ * check rides along with the `]` scan instead of a second pass. */
+static inline int next_special9(const uint8_t *s, size_t n, size_t from, const __m128i *v) {
+    size_t i = from;
+    while (i + 16 <= n) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(s + i));
+        unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[0]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[1]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[2]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[3]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[4]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[5]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[6]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[7]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[8]));
+        if (m) return (int)(i + (size_t)__builtin_ctz(m));
+        i += 16;
+    }
+    while (i < n) {
+        uint8_t c = s[i];
+        if (c == '\\' || c == '`' || c == '[' || c == '*' || c == '&' || c == '<' || c == '>' || c == '"' || c == '\'') return (int)i;
+        i++;
+    }
+    return -1;
+}
+
+static inline int next_special10(const uint8_t *s, size_t n, size_t from, const __m128i *v) {
+    size_t i = from;
+    while (i + 16 <= n) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(s + i));
+        unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[0]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[1]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[2]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[3]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[4]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[5]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[6]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[7]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[8]))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v[9]));
+        if (m) return (int)(i + (size_t)__builtin_ctz(m));
+        i += 16;
+    }
+    while (i < n) {
+        uint8_t c = s[i];
+        if (c == '\\' || c == '`' || c == '[' || c == '*' || c == '&' || c == '<' || c == '>' || c == '"' || c == '\'' || c == ']') return (int)i;
+        i++;
+    }
+    return -1;
+}
+
+static inline int next_byte_sse(const uint8_t *s, size_t n, size_t from, __m128i vec, uint8_t byte) {
+    size_t i = from;
+    while (i + 16 <= n) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(s + i));
+        unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, vec));
+        if (m) return (int)(i + (size_t)__builtin_ctz(m));
+        i += 16;
+    }
+    while (i < n) {
+        if (s[i] == byte) return (int)i;
+        i++;
+    }
+    return -1;
+}
+
+/* Find the closing emphasis delimiter at or after `from` (dbl=1 looks for
+ * `**`, dbl=0 for a single `*`), mirroring the old find_em_close exactly.
+ * Sets *clean=1 when the span before the closer holds no other inline
+ * special. Returns the closer index or -1. */
+static inline int em_close_fused(const uint8_t *s, size_t n, size_t from, int dbl, int *clean, const __m128i *v) {
+    *clean = 1;
+    size_t pos = from;
+    for (;;) {
+        int j = next_special9(s, n, pos, v);
+        if (j < 0) return -1;
+        uint8_t c = s[j];
+        if (c == '\\') {
+            *clean = 0;
+            if ((size_t)j + 1 < n && is_escapable(s[j+1])) pos = (size_t)j + 2;
+            else pos = (size_t)j + 1;
+            continue;
+        }
+        if (c == '*') {
+            if (dbl) {
+                if ((size_t)j + 1 < n && s[j+1] == '*') return j;
+                *clean = 0;
+                pos = (size_t)j + 1;
+                continue;
+            }
+            if ((size_t)j + 1 < n && s[j+1] == '*') { *clean = 0; pos = (size_t)j + 2; continue; }
+            return j;
+        }
+        *clean = 0;
+        pos = (size_t)j + 1;
+    }
+}
+
+/* Find the first unescaped `]` at or after `from` (backslash escapes
+ * skipped, mirroring find_unescaped). Sets *clean=0 if any inline
+ * special occurs in [from, k) — the old code's separate link-text
+ * clean check, folded into this single pass. Returns k or -1. */
+static inline int bracket_close_fused(const uint8_t *s, size_t n, size_t from, int *clean, const __m128i *v) {
+    *clean = 1;
+    size_t pos = from;
+    for (;;) {
+        int j = next_special10(s, n, pos, v);
+        if (j < 0) return -1;
+        uint8_t c = s[j];
+        if (c == '\\') {
+            *clean = 0;
+            if ((size_t)j + 1 < n && is_escapable(s[j+1])) pos = (size_t)j + 2;
+            else pos = (size_t)j + 1;
+            continue;
+        }
+        if (c == ']') return j;
+        *clean = 0;
+        pos = (size_t)j + 1;
+    }
+}
+
+static void inline_fused(Arena *ar, LinkEnv *env, const uint8_t *s, size_t n, Buf *out, Buf *tmp) {
+    __m128i vec[11];
+    vec[0] = _mm_set1_epi8('\\');
+    vec[1] = _mm_set1_epi8('`');
+    vec[2] = _mm_set1_epi8('[');
+    vec[3] = _mm_set1_epi8('*');
+    vec[4] = _mm_set1_epi8('&');
+    vec[5] = _mm_set1_epi8('<');
+    vec[6] = _mm_set1_epi8('>');
+    vec[7] = _mm_set1_epi8('"');
+    vec[8] = _mm_set1_epi8('\'');
+    vec[9] = _mm_set1_epi8(']');
+    vec[10] = _mm_set1_epi8(')');
+    buf_reserve(out, out->len + 16 * n + 1024);
+    uint8_t *wp = out->p + out->len;
+    size_t i = 0;
+    while (i < n) {
+        int j = next_special9(s, n, i, vec);
+        if (j < 0) {
+            xmemcpy(wp, s + i, n - i); wp += n - i;
+            break;
+        }
+        size_t fj = (size_t)j;
+        if (fj > i) { size_t chunk = fj - i; xmemcpy(wp, s + i, chunk); wp += chunk; }
+        uint8_t c = s[fj];
+        switch (c) {
+            case '\\': {
+                if (fj + 1 < n && is_escapable(s[fj+1])) {
+                    uint8_t e = s[fj+1];
+                    if (e == '>') { wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4; }
+                    else *wp++ = e;
+                    i = fj + 2;
+                } else {
+                    *wp++ = '\\';
+                    i = fj + 1;
+                }
+                break;
+            }
+            case '`': {
+                int k = next_byte_sse(s, n, fj + 1, vec[1], '`');
+                if (k >= 0 && (size_t)k > fj + 1) {
+                    xmemcpy(wp, (const uint8_t *)"<code>", 6); wp += 6;
+                    out->len = (size_t)(wp - out->p);
+                    write_esc_html_bytes(s + fj + 1, (size_t)k - (fj + 1), out);
+                    wp = out->p + out->len;
+                    xmemcpy(wp, (const uint8_t *)"</code>", 7); wp += 7;
+                    i = (size_t)k + 1;
+                } else {
+                    *wp++ = '`';
+                    i = fj + 1;
+                }
+                break;
+            }
+            case '*': {
+                if (fj + 1 < n && s[fj+1] == '*') {
+                    int clean = 0;
+                    int k = em_close_fused(s, n, fj + 2, 1, &clean, vec);
+                    if (k > (int)(fj + 2)) {
+                        xmemcpy(wp, (const uint8_t *)"<strong>", 8); wp += 8;
+                        if (clean) {
+                            size_t inner = (size_t)k - (fj + 2);
+                            xmemcpy(wp, s + fj + 2, inner); wp += inner;
+                        } else {
+                            out->len = (size_t)(wp - out->p);
+                            inline_fused(ar, env, s + fj + 2, (size_t)k - (fj + 2), out, tmp);
+                            wp = out->p + out->len;
+                        }
+                        xmemcpy(wp, (const uint8_t *)"</strong>", 9); wp += 9;
+                        i = (size_t)k + 2;
+                    } else {
+                        xmemcpy(wp, (const uint8_t *)"**", 2); wp += 2;
+                        i = fj + 2;
+                    }
+                } else {
+                    int clean = 0;
+                    int k = em_close_fused(s, n, fj + 1, 0, &clean, vec);
+                    if (k > (int)(fj + 1)) {
+                        xmemcpy(wp, (const uint8_t *)"<em>", 4); wp += 4;
+                        if (clean) {
+                            size_t inner = (size_t)k - (fj + 1);
+                            xmemcpy(wp, s + fj + 1, inner); wp += inner;
+                        } else {
+                            out->len = (size_t)(wp - out->p);
+                            inline_fused(ar, env, s + fj + 1, (size_t)k - (fj + 1), out, tmp);
+                            wp = out->p + out->len;
+                        }
+                        xmemcpy(wp, (const uint8_t *)"</em>", 5); wp += 5;
+                        i = (size_t)k + 1;
+                    } else {
+                        *wp++ = '*';
+                        i = fj + 1;
+                    }
+                }
+                break;
+            }
+            case '[': {
+                int clean = 1;
+                int k = bracket_close_fused(s, n, fj + 1, &clean, vec);
+                int m = -1;
+                if (k != -1 && (size_t)k + 1 < n && s[k+1] == '(') {
+                    int q = next_byte_sse(s, n, (size_t)k + 2, vec[10], ')');
+                    if (q >= 0) m = q;
+                }
+                size_t tl = 0;
+                const uint8_t *target = (const uint8_t *)"";
+                if (m != -1) { target = s + (size_t)k + 2; tl = (size_t)m - ((size_t)k + 2); }
+                if (tl > 0 && !has_ws(target, tl)) {
+                    size_t href_len;
+                    const uint8_t *href = resolve_link(ar, env, target, tl, tmp, &href_len);
+                    xmemcpy(wp, (const uint8_t *)"<a href=\"", 9); wp += 9;
+                    out->len = (size_t)(wp - out->p);
+                    write_esc_html_bytes(href, href_len, out);
+                    wp = out->p + out->len;
+                    xmemcpy(wp, (const uint8_t *)"\">", 2); wp += 2;
+                    size_t tstart = fj + 1;
+                    size_t tlen = (size_t)k - tstart;
+                    if (clean) {
+                        xmemcpy(wp, s + tstart, tlen); wp += tlen;
+                    } else {
+                        out->len = (size_t)(wp - out->p);
+                        inline_fused(ar, env, s + tstart, tlen, out, tmp);
+                        wp = out->p + out->len;
+                    }
+                    xmemcpy(wp, (const uint8_t *)"</a>", 4); wp += 4;
+                    i = (size_t)m + 1;
+                } else {
+                    *wp++ = '[';
+                    i = fj + 1;
+                }
+                break;
+            }
+            case '&': {
+                wp[0]='&'; wp[1]='a'; wp[2]='m'; wp[3]='p'; wp[4]=';'; wp += 5;
+                i = fj + 1; break;
+            }
+            case '<': {
+                wp[0]='&'; wp[1]='l'; wp[2]='t'; wp[3]=';'; wp += 4;
+                i = fj + 1; break;
+            }
+            case '>': {
+                wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4;
+                i = fj + 1; break;
+            }
+            case '"': {
+                wp[0]='&'; wp[1]='q'; wp[2]='u'; wp[3]='o'; wp[4]='t'; wp[5]=';'; wp += 6;
+                i = fj + 1; break;
+            }
+            default: {
+                wp[0]='&'; wp[1]='#'; wp[2]='3'; wp[3]='9'; wp[4]=';'; wp += 5;
+                i = fj + 1; break;
+            }
+        }
+    }
+    out->len = (size_t)(wp - out->p);
+}
+
 static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t n, Buf *out, Buf *tmp) {
     static const uint8_t needles[] = {'\\', '`', '[', '*', '&', '<', '>', '"', '\''};
 #ifdef SG_PROFILE
     prof_in_calls++;
 #endif
+    /* One reserve up front, then write through a raw cursor: the old loop
+     * paid two out-of-line calls (buf_puts + buf_reserve) per chunk and
+     * per entity. Worst case is 6 bytes out per input byte (an entity)
+     * plus delimiter tags; 16x covers it. Nested calls that also write
+     * to `out` (recursion, write_esc_html_bytes) sync the length first
+     * and the cursor is re-derived after them. */
+    buf_reserve(out, out->len + 16 * n + 1024);
+    uint8_t *wp = out->p + out->len;
     size_t i = 0;
     while (i < n) {
         int j = find_any_sse(s, n, i, needles, 9);
@@ -450,12 +914,15 @@ static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t
 #ifdef SG_PROFILE
             prof_in_span_bytes += (long)(n - i);
 #endif
-            buf_puts(out, s + i, n - i); return;
+            xmemcpy(wp, s + i, n - i); wp += n - i;
+            out->len = (size_t)(wp - out->p);
+            return;
         }
 #ifdef SG_PROFILE
         prof_in_span_bytes += (long)((size_t)j - i);
 #endif
-        buf_puts(out, s + i, (size_t)j - i);
+        size_t chunk = (size_t)j - i;
+        xmemcpy(wp, s + i, chunk); wp += chunk;
         uint8_t c = s[j];
         switch (c) {
             case '\\': {
@@ -464,11 +931,11 @@ static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t
 #endif
                 if ((size_t)j + 1 < n && is_escapable(s[j+1])) {
                     uint8_t e = s[j+1];
-                    if (e == '>') buf_puts(out, (const uint8_t *)"&gt;", 4);
-                    else buf_put(out, e);
+                    if (e == '>') { wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4; }
+                    else *wp++ = e;
                     i = (size_t)j + 2;
                 } else {
-                    buf_put(out, '\\');
+                    *wp++ = '\\';
                     i = (size_t)j + 1;
                 }
                 break;
@@ -476,51 +943,90 @@ static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t
             case '`': {
 #ifdef SG_PROFILE
                 prof_in_tick++;
+                long _tt0 = prof_md_now_ns();
 #endif
                 static const uint8_t bt[1] = {'`'};
                 int k = find_any_sse(s, n, (size_t)j + 1, bt, 1);
                 if (k >= 0 && (size_t)k > (size_t)j + 1) {
-                    buf_puts(out, (const uint8_t *)"<code>", 6);
+                    xmemcpy(wp, (const uint8_t *)"<code>", 6); wp += 6;
+                    out->len = (size_t)(wp - out->p);
                     write_esc_html_bytes(s + j + 1, (size_t)k - ((size_t)j + 1), out);
-                    buf_puts(out, (const uint8_t *)"</code>", 7);
+                    wp = out->p + out->len;
+                    xmemcpy(wp, (const uint8_t *)"</code>", 7); wp += 7;
                     i = (size_t)k + 1;
                 } else {
-                    buf_put(out, '`');
+                    *wp++ = '`';
                     i = (size_t)j + 1;
                 }
+#ifdef SG_PROFILE
+                prof_tick_ns += prof_md_now_ns() - _tt0;
+                prof_tick_n++;
+#endif
                 break;
             }
             case '*': {
 #ifdef SG_PROFILE
                 prof_in_star++;
+                long _st0 = prof_md_now_ns();
 #endif
                 if ((size_t)j + 1 < n && s[j+1] == '*') {
 #ifdef SG_PROFILE
                     prof_in_star2++;
 #endif
-                    static const uint8_t star2[2] = {'*', '*'};
-                    int k = find_unescaped(s, n, star2, 2, (size_t)j + 2);
+                    int clean = 0;
+                    int k = find_em_close(s, n, (size_t)j + 2, 1, &clean);
                     if (k > (int)(j + 2)) {
-                        buf_puts(out, (const uint8_t *)"<strong>", 8);
-                        inline_bytes_inner(ar, env, s + j + 2, (size_t)k - ((size_t)j + 2), out, tmp);
-                        buf_puts(out, (const uint8_t *)"</strong>", 9);
+                        xmemcpy(wp, (const uint8_t *)"<strong>", 8); wp += 8;
+                        if (clean) {
+#ifdef SG_PROFILE
+                            prof_star_clean++;
+#endif
+                            size_t inner = (size_t)k - ((size_t)j + 2);
+                            xmemcpy(wp, s + j + 2, inner); wp += inner;
+                        } else {
+#ifdef SG_PROFILE
+                            prof_star_dirty++;
+#endif
+                            out->len = (size_t)(wp - out->p);
+                            inline_bytes_inner(ar, env, s + j + 2, (size_t)k - ((size_t)j + 2), out, tmp);
+                            wp = out->p + out->len;
+                        }
+                        xmemcpy(wp, (const uint8_t *)"</strong>", 9); wp += 9;
                         i = (size_t)k + 2;
                     } else {
-                        buf_puts(out, (const uint8_t *)"**", 2);
+                        xmemcpy(wp, (const uint8_t *)"**", 2); wp += 2;
                         i = (size_t)j + 2;
                     }
                 } else {
-                    int k = find_single_star(s, n, (size_t)j + 1);
+                    int clean = 0;
+                    int k = find_em_close(s, n, (size_t)j + 1, 0, &clean);
                     if (k > (int)(j + 1)) {
-                        buf_puts(out, (const uint8_t *)"<em>", 4);
-                        inline_bytes_inner(ar, env, s + j + 1, (size_t)k - ((size_t)j + 1), out, tmp);
-                        buf_puts(out, (const uint8_t *)"</em>", 5);
+                        xmemcpy(wp, (const uint8_t *)"<em>", 4); wp += 4;
+                        if (clean) {
+#ifdef SG_PROFILE
+                            prof_star_clean++;
+#endif
+                            size_t inner = (size_t)k - ((size_t)j + 1);
+                            xmemcpy(wp, s + j + 1, inner); wp += inner;
+                        } else {
+#ifdef SG_PROFILE
+                            prof_star_dirty++;
+#endif
+                            out->len = (size_t)(wp - out->p);
+                            inline_bytes_inner(ar, env, s + j + 1, (size_t)k - ((size_t)j + 1), out, tmp);
+                            wp = out->p + out->len;
+                        }
+                        xmemcpy(wp, (const uint8_t *)"</em>", 5); wp += 5;
                         i = (size_t)k + 1;
                     } else {
-                        buf_put(out, '*');
+                        *wp++ = '*';
                         i = (size_t)j + 1;
                     }
                 }
+#ifdef SG_PROFILE
+                prof_star_ns += prof_md_now_ns() - _st0;
+                prof_star_n++;
+#endif
                 break;
             }
             case '[': {
@@ -544,14 +1050,34 @@ static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t
 #endif
                     size_t href_len;
                     const uint8_t *href = resolve_link(ar, env, target, tl, tmp, &href_len);
-                    buf_puts(out, (const uint8_t *)"<a href=\"", 9);
+                    xmemcpy(wp, (const uint8_t *)"<a href=\"", 9); wp += 9;
+                    out->len = (size_t)(wp - out->p);
                     write_esc_html_bytes(href, href_len, out);
-                    buf_puts(out, (const uint8_t *)"\">", 2);
-                    inline_bytes_inner(ar, env, s + j + 1, (size_t)k - ((size_t)j + 1), out, tmp);
-                    buf_puts(out, (const uint8_t *)"</a>", 4);
+                    wp = out->p + out->len;
+                    xmemcpy(wp, (const uint8_t *)"\">", 2); wp += 2;
+                    /* Link text: copy verbatim when it holds no inline
+                     * special (same fast path as emphasis); otherwise
+                     * recurse. The scan is bounded to the link text. */
+                    size_t tstart = (size_t)j + 1;
+                    size_t tlen = (size_t)k - tstart;
+                    int fs = find_any_sse(s, (size_t)k, tstart, needles, 9);
+                    if (fs < 0) {
+#ifdef SG_PROFILE
+                        prof_link_clean++;
+#endif
+                        xmemcpy(wp, s + tstart, tlen); wp += tlen;
+                    } else {
+#ifdef SG_PROFILE
+                        prof_link_dirty++;
+#endif
+                        out->len = (size_t)(wp - out->p);
+                        inline_bytes_inner(ar, env, s + tstart, tlen, out, tmp);
+                        wp = out->p + out->len;
+                    }
+                    xmemcpy(wp, (const uint8_t *)"</a>", 4); wp += 4;
                     i = (size_t)m + 1;
                 } else {
-                    buf_put(out, '[');
+                    *wp++ = '[';
                     i = (size_t)j + 1;
                 }
 #ifdef SG_PROFILE
@@ -564,34 +1090,40 @@ static void inline_bytes_inner(Arena *ar, LinkEnv *env, const uint8_t *s, size_t
 #ifdef SG_PROFILE
                 prof_in_esc++;
 #endif
-                buf_puts(out, (const uint8_t *)"&amp;", 5); i = (size_t)j + 1; break;
+                wp[0]='&'; wp[1]='a'; wp[2]='m'; wp[3]='p'; wp[4]=';'; wp += 5;
+                i = (size_t)j + 1; break;
             }
             case '<': {
 #ifdef SG_PROFILE
                 prof_in_esc++;
 #endif
-                buf_puts(out, (const uint8_t *)"&lt;", 4); i = (size_t)j + 1; break;
+                wp[0]='&'; wp[1]='l'; wp[2]='t'; wp[3]=';'; wp += 4;
+                i = (size_t)j + 1; break;
             }
             case '>': {
 #ifdef SG_PROFILE
                 prof_in_esc++;
 #endif
-                buf_puts(out, (const uint8_t *)"&gt;", 4); i = (size_t)j + 1; break;
+                wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4;
+                i = (size_t)j + 1; break;
             }
             case '"': {
 #ifdef SG_PROFILE
                 prof_in_esc++;
 #endif
-                buf_puts(out, (const uint8_t *)"&quot;", 6); i = (size_t)j + 1; break;
+                wp[0]='&'; wp[1]='q'; wp[2]='u'; wp[3]='o'; wp[4]='t'; wp[5]=';'; wp += 6;
+                i = (size_t)j + 1; break;
             }
             default: {
 #ifdef SG_PROFILE
                 prof_in_esc++;
 #endif
-                buf_puts(out, (const uint8_t *)"&#39;", 5); i = (size_t)j + 1; break;
+                wp[0]='&'; wp[1]='#'; wp[2]='3'; wp[3]='9'; wp[4]=';'; wp += 5;
+                i = (size_t)j + 1; break;
             }
         }
     }
+    out->len = (size_t)(wp - out->p);
 }
 
 #ifdef SG_PROFILE
@@ -601,7 +1133,7 @@ static void inline_bytes(Arena *ar, LinkEnv *env, const uint8_t *s, size_t n, Bu
     md_inline_ns += prof_md_now_ns() - t0;
 }
 #else
-#define inline_bytes inline_bytes_inner
+#define inline_bytes inline_fused
 #endif
 
 bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
@@ -613,6 +1145,23 @@ bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
 #endif
     buf_clear(scratch);
     size_t off = src.off, len = src.len, end = off + len;
+    /* pre-split env->dir once per page (link resolution reuses it). */
+    {
+        const uint8_t *db = ar_get(ar, env->dir);
+        size_t np = 0; int ok = 1;
+        if (env->dir.len == 0) { env->ndir_parts = 0; env->dir_parts_ok = 1; }
+        else {
+            size_t s = 0;
+            for (size_t i = 0; i <= env->dir.len; i++) {
+                if (i == env->dir.len || db[i] == '/') {
+                    if (np < 16) { env->dir_parts[np] = db + s; env->dir_plens[np] = i - s; np++; }
+                    else { ok = 0; break; }
+                    s = i + 1;
+                }
+            }
+            env->ndir_parts = np; env->dir_parts_ok = (uint8_t)ok;
+        }
+    }
     Vec toc_html; vec_init(&toc_html, sizeof(Range));
     bool has_excerpt = false;
     Range excerpt_range = {0, 0};
@@ -625,10 +1174,15 @@ bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
     while (i < end) {
         int nl = find_nl(ar, i, end);
         size_t le = nl >= 0 ? (size_t)nl : end;
-        if (is_blank(ar, i, le)) { i = le + 1; continue; }
-        /* Fenced code. */
+        if (le == i) { i = le + 1; continue; } /* empty line */
+        /* First-byte dispatch: each construct can only start with certain
+         * bytes, so a plain text line skips every check below (the old
+         * loop paid five calls per line). Order is the reference's. */
+        uint8_t c0 = ar->buf[i];
+        if ((c0 == ' ' || c0 == '\t') && is_blank(ar, i, le)) { i = le + 1; continue; }
+        /* Fenced code (only '`'). */
         size_t loff, llen;
-        if (fence_open(ar, i, le, &loff, &llen)) {
+        if (c0 == '`' && fence_open(ar, i, le, &loff, &llen)) {
             buf_puts(scratch, (const uint8_t *)"<pre><code", 10);
             if (llen > 0) {
                 buf_puts(scratch, (const uint8_t *)" class=\"language-", 17);
@@ -649,9 +1203,9 @@ bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
             buf_puts(scratch, (const uint8_t *)"</code></pre>\n", 14);
             continue;
         }
-        /* ATX heading. */
+        /* ATX heading (only '#'). */
         size_t depth, t_off, t_len;
-        if (heading_of(ar, i, le, &depth, &t_off, &t_len)) {
+        if (c0 == '#' && heading_of(ar, i, le, &depth, &t_off, &t_len)) {
             S text_s = {(uint32_t)t_off, (uint32_t)t_len};
             S slug = utf_slugify(ar, text_s, slug_cache);
             S id = utf_unique_slug(ar, slug, &ids);
@@ -675,8 +1229,8 @@ bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
             i = le + 1;
             continue;
         }
-        /* Thematic break. */
-        if (is_hr(ar, i, le)) {
+        /* Thematic break (only '-'/'*'). */
+        if ((c0 == '-' || c0 == '*') && is_hr(ar, i, le)) {
             buf_puts(scratch, (const uint8_t *)"<hr>\n", 5);
             i = le + 1;
             continue;
@@ -709,9 +1263,10 @@ bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
             }
             continue;
         }
-        /* Lists. */
+        /* Lists (only '-', '*', digit). */
         bool ordered; int64_t start_num;
-        if (list_start(ar, i, le, &ordered, &start_num, item_buf)) {
+        if ((c0 == '-' || c0 == '*' || (c0 >= '0' && c0 <= '9'))
+            && list_start(ar, i, le, &ordered, &start_num, item_buf)) {
             bool is_ordered = ordered;
             /* Items as arena spans; one scratch Buf reused for the current
              * item (a fresh Buf per item cost an mmap each: ~6.6k items). */

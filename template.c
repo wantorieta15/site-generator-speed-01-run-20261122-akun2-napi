@@ -7,7 +7,17 @@
 
 #ifdef SG_PROFILE
 long prof_include_ns, prof_include_n, prof_for_ns;
+long prof_for_calls, prof_for_iters, prof_for_segs;
+long prof_for_it_cards, prof_for_it_tagsums, prof_for_it_tagrefs, prof_for_it_toc, prof_for_it_other;
+long prof_for_ca_cards, prof_for_ca_tagsums, prof_for_ca_tagrefs, prof_for_ca_toc, prof_for_ca_other;
+long prof_var_for_n, prof_var_for_bytes, prof_var_for_lt16, prof_var_for_16_63, prof_var_for_ge64;
+long prof_hit_bytes;
+static int g_for_depth;
 long prof_cache_hit, prof_cache_miss;
+long prof_cache_lk_stor, prof_cache_lk_nonstor;
+long prof_cache_miss_nonstor, prof_cache_miss_first, prof_cache_miss_full, prof_cache_stored;
+long prof_tpl_nonstor_repeat;
+static uint64_t tpl_nonstor_seen[65536];
 void prof_tpl_print(void) {
     uint8_t buf[160];
     size_t n = 0;
@@ -29,8 +39,71 @@ void prof_tpl_print(void) {
     v = prof_for_ns / 1000000; i = 20;
     if (v == 0) buf[n++] = '0';
     else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) buf[n++] = (uint8_t)tmp[i++]; }
-    buf[n++] = 'm'; buf[n++] = 's'; buf[n++] = '\n';
+    buf[n++] = 'm'; buf[n++] = 's'; buf[n++] = ' ';
+    const char *d = "calls=";
+    while (*d) buf[n++] = (uint8_t)*d++;
+    v = prof_for_calls; i = 20;
+    if (v == 0) buf[n++] = '0';
+    else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) buf[n++] = (uint8_t)tmp[i++]; }
+    buf[n++] = ' ';
+    const char *e2 = "iters=";
+    while (*e2) buf[n++] = (uint8_t)*e2++;
+    v = prof_for_iters; i = 20;
+    if (v == 0) buf[n++] = '0';
+    else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) buf[n++] = (uint8_t)tmp[i++]; }
+    buf[n++] = ' ';
+    const char *f2 = "segs=";
+    while (*f2) buf[n++] = (uint8_t)*f2++;
+    v = prof_for_segs; i = 20;
+    if (v == 0) buf[n++] = '0';
+    else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) buf[n++] = (uint8_t)tmp[i++]; }
+    buf[n++] = '\n';
     sys_write(2, buf, (long)n);
+    {
+        uint8_t b4[160]; size_t m = 0;
+        const char *labels[5] = {"forCards=", "forTags=", "forTagRefs=", "forToc=", "forOther="};
+        long iv[5] = {prof_for_it_cards, prof_for_it_tagsums, prof_for_it_tagrefs, prof_for_it_toc, prof_for_it_other};
+        long cv[5] = {prof_for_ca_cards, prof_for_ca_tagsums, prof_for_ca_tagrefs, prof_for_ca_toc, prof_for_ca_other};
+        for (int q = 0; q < 5; q++) {
+            const char *a = labels[q];
+            while (*a) b4[m++] = (uint8_t)*a++;
+            long vv = iv[q]; char tmp[20]; int i = 20;
+            if (vv == 0) b4[m++] = '0';
+            else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+            b4[m++] = '/';
+            vv = cv[q]; i = 20;
+            if (vv == 0) b4[m++] = '0';
+            else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b4[m++] = (uint8_t)tmp[i++]; }
+            b4[m++] = ' ';
+        }
+        b4[m++] = '\n';
+        sys_write(2, b4, (long)m);
+    }
+    {
+        uint8_t b5[160]; size_t m = 0;
+        const char *labels[5] = {"varForN=", "varForBytes=", "lt16=", "b16_63=", "ge64="};
+        long vals[5] = {prof_var_for_n, prof_var_for_bytes, prof_var_for_lt16, prof_var_for_16_63, prof_var_for_ge64};
+        for (int q = 0; q < 5; q++) {
+            const char *a = labels[q];
+            while (*a) b5[m++] = (uint8_t)*a++;
+            long vv = vals[q]; char tmp[20]; int i = 20;
+            if (vv == 0) b5[m++] = '0';
+            else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b5[m++] = (uint8_t)tmp[i++]; }
+            b5[m++] = ' ';
+        }
+        b5[m++] = '\n';
+        sys_write(2, b5, (long)m);
+    }
+    {
+        uint8_t b6[40]; size_t m = 0;
+        const char *a = "hitBytes=";
+        while (*a) b6[m++] = (uint8_t)*a++;
+        long vv = prof_hit_bytes; char tmp[20]; int i = 20;
+        if (vv == 0) b6[m++] = '0';
+        else { while (vv > 0) { tmp[--i] = (char)('0' + vv % 10); vv /= 10; } while (i < 20) b6[m++] = (uint8_t)tmp[i++]; }
+        b6[m++] = '\n';
+        sys_write(2, b6, (long)m);
+    }
 #ifdef SG_PROFILE
     {
         uint8_t b2[96]; size_t m = 0;
@@ -47,6 +120,27 @@ void prof_tpl_print(void) {
         else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b2[m++] = (uint8_t)tmp[i++]; }
         b2[m++] = '\n';
         sys_write(2, b2, (long)m);
+    }
+    {
+        /* miss reasons: lkStor/lkNon = lookups by storable flag;
+         * missNon = non-storable (never stored), missFirst = first render
+         * of a storable template, missFull = storable but entries cap hit,
+         * stored = entries actually stored. */
+        uint8_t b3[224]; size_t m = 0;
+        const char *labels[7] = {"lkStor=", "lkNon=", "missNon=", "missFirst=", "missFull=", "stored=", "nonstorRepeat="};
+        long vals[7] = {prof_cache_lk_stor, prof_cache_lk_nonstor, prof_cache_miss_nonstor,
+                        prof_cache_miss_first, prof_cache_miss_full, prof_cache_stored,
+                        prof_tpl_nonstor_repeat};
+        for (int q = 0; q < 7; q++) {
+            const char *a = labels[q];
+            while (*a) b3[m++] = (uint8_t)*a++;
+            long v = vals[q]; char tmp[20]; int i = 20;
+            if (v == 0) b3[m++] = '0';
+            else { while (v > 0) { tmp[--i] = (char)('0' + v % 10); v /= 10; } while (i < 20) b3[m++] = (uint8_t)tmp[i++]; }
+            b3[m++] = ' ';
+        }
+        b3[m++] = '\n';
+        sys_write(2, b3, (long)m);
     }
 #endif
 }
@@ -827,6 +921,26 @@ static bool v_equal(V a, V b) {
         && a.lp.length == b.lp.length;
 }
 
+/* ---- output segments (writev) ---- */
+#define OUTSEG_MAX 8192
+static OutSeg g_outsegs[OUTSEG_MAX];
+static size_t g_outseg_n = 0;
+/* >0 while rendering a template whose output becomes a cached span
+ * (a miss-render). Hits inside such a render MUST be copied into `out`:
+ * the enclosing span is measured by ar_finish(out), so a merely-referenced
+ * hit would leave the enclosing span short by the hit's bytes. Only hits
+ * at the top level of the final output stream may be recorded as segments. */
+static int g_cache_build = 0;
+bool tpl_outseg_try(uint32_t off, S span) {
+    if (g_outseg_n >= OUTSEG_MAX) return false;
+    g_outsegs[g_outseg_n].off = off;
+    g_outsegs[g_outseg_n].span = span;
+    g_outseg_n++;
+    return true;
+}
+size_t tpl_outseg_count(void) { return g_outseg_n; }
+const OutSeg *tpl_outseg_list(void) { return g_outsegs; }
+
 void tpl_cache_init(State *st, Arena *ar) {
     /* Index stays well above the stored-entry cap so probes stay short;
      * entries are capped below the index size (a full index would loop). */
@@ -835,6 +949,11 @@ void tpl_cache_init(State *st, Arena *ar) {
     for (size_t i = 0; i < cap; i++) st->tpl_cache_idx[i] = -1;
     st->tpl_cache_mask = cap - 1;
     vec_init(&st->tpl_cache_entries, sizeof(TplCacheEntry));
+#ifdef SG_PROFILE
+    /* Fresh non-storable repeat set per case (the lookup hash has no case
+     * identity, so cross-case repeats would be false positives). */
+    xmemset(tpl_nonstor_seen, 0, sizeof(tpl_nonstor_seen));
+#endif
 }
 
 static V root_value(Frame *frames, uint8_t field) {
@@ -922,6 +1041,20 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                 ar_push_slice(out, ar_get(st->ar, seg->text), seg->text.len);
                 break;
             case SEG_VAR: {
+#ifdef SG_PROFILE
+                if (g_for_depth > 0) {
+                    prof_var_for_n++;
+                    V vv = tpl_eval_slot(st, frames, *nframes, &seg->slot);
+                    if (vv.tag == V_STR) {
+                        prof_var_for_bytes += (long)vv.s.len;
+                        if (vv.s.len < 16) prof_var_for_lt16++;
+                        else if (vv.s.len < 64) prof_var_for_16_63++;
+                        else prof_var_for_ge64++;
+                    }
+                    v_write_value(st, vv, out, !seg->raw, scratch);
+                    break;
+                }
+#endif
                 V v = tpl_eval_slot(st, frames, *nframes, &seg->slot);
                 v_write_value(st, v, out, !seg->raw, scratch);
                 break;
@@ -939,6 +1072,18 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                 V v = tpl_eval_slot(st, frames, *nframes, &seg->slot);
                 if (v.tag == V_ARR) {
                     size_t len = state_arr_len(st, v.kind, v.idx);
+#ifdef SG_PROFILE
+                    prof_for_calls++;
+                    prof_for_iters += (long)len;
+                    prof_for_segs += (long)(len * seg->body.len);
+                    switch (v.kind) {
+                        case AK_CARDS: prof_for_it_cards += (long)len; prof_for_ca_cards++; break;
+                        case AK_TAGSUMS: prof_for_it_tagsums += (long)len; prof_for_ca_tagsums++; break;
+                        case AK_TAGREFS: prof_for_it_tagrefs += (long)len; prof_for_ca_tagrefs++; break;
+                        case AK_TOC: prof_for_it_toc += (long)len; prof_for_ca_toc++; break;
+                        default: prof_for_it_other += (long)len; prof_for_ca_other++; break;
+                    }
+#endif
                     for (size_t i = 0; i < len; i++) {
                         V elem = state_arr_elem(st, v.kind, v.idx, i);
                         LoopV lp = {(int64_t)i + 1, i == 0, i + 1 == len, (int64_t)len};
@@ -949,9 +1094,11 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                         fr->lp = lp;
                         fr->page = -1; fr->posts = -1; fr->pager = -1; fr->tag = -1;
 #ifdef SG_PROFILE
+                        g_for_depth++;
                         long _ft0 = prof_md_now_ns();
                         tpl_render(st, templates, &seg->body, frames, nframes, out, scratch, depth);
                         prof_for_ns += prof_md_now_ns() - _ft0;
+                        g_for_depth--;
 #else
                         tpl_render(st, templates, &seg->body, frames, nframes, out, scratch, depth);
 #endif
@@ -964,7 +1111,10 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                 if (depth < INCLUDE_DEPTH && seg->tpl_idx >= 0) {
                     size_t k = (size_t)seg->tpl_idx;
                     Template *t = vec_at(templates, k);
-                            if (t->cacheable && st->tpl_cache_idx) {
+                            if (t->cacheable && t->storable && st->tpl_cache_idx) {
+#ifdef SG_PROFILE
+                                if (t->storable) prof_cache_lk_stor++; else prof_cache_lk_nonstor++;
+#endif
                                 uint64_t h = 1469598103934665603ULL;
                                 h ^= (uint64_t)k; h *= 1099511628211ULL;
                                 h ^= (uint64_t)(depth + 1); h *= 1099511628211ULL;
@@ -975,6 +1125,18 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                                     keys[di] = dep_base_value(st, frames, *nframes, d);
                                     h = v_hash(h, keys[di]);
                                 }
+#ifdef SG_PROFILE
+                                /* Would a non-storable lookup have hit if it
+                                 * were stored? Count key repeats (per case;
+                                 * the set is reset in tpl_cache_init). */
+                                if (!t->storable) {
+                                    uint64_t hh = h ? h : 1;
+                                    size_t slot = (size_t)hh & 65535;
+                                    while (tpl_nonstor_seen[slot] != 0 && tpl_nonstor_seen[slot] != hh) slot = (slot + 1) & 65535;
+                                    if (tpl_nonstor_seen[slot] == hh) prof_tpl_nonstor_repeat++;
+                                    else tpl_nonstor_seen[slot] = hh;
+                                }
+#endif
                                 size_t mask = st->tpl_cache_mask;
                                 size_t slot = (size_t)h & mask;
                                 bool hit = false;
@@ -986,19 +1148,37 @@ void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nfr
                                         if (eq) {
 #ifdef SG_PROFILE
                                             prof_cache_hit++;
+                                            prof_hit_bytes += (long)e->bytes.len;
 #endif
-                                            ar_push_span(out, e->bytes); hit = true; break; }
+                                            /* Top-level hit: record as a writev
+                                             * segment instead of copying (fall
+                                             * back to copy if the list is full).
+                                             * Inside a cached-span build, copy:
+                                             * the enclosing span must physically
+                                             * contain these bytes. */
+                                            if (g_cache_build > 0) ar_push_span(out, e->bytes);
+                                            else if (!tpl_outseg_try((uint32_t)out->len, e->bytes))
+                                                ar_push_span(out, e->bytes);
+                                            hit = true; break; }
                                     }
                                     slot = (slot + 1) & mask;
                                 }
                                 if (!hit) {
 #ifdef SG_PROFILE
                                     prof_cache_miss++;
+                                    if (!t->storable) prof_cache_miss_nonstor++;
+                                    else if (st->tpl_cache_entries.len >= 4096) prof_cache_miss_full++;
+                                    else prof_cache_miss_first++;
 #endif
                                     uint32_t start = ar_begin(out);
+                                    g_cache_build++;
                                     tpl_render(st, templates, &t->segs, frames, nframes, out, scratch, depth + 1);
+                                    g_cache_build--;
                                     S span = ar_finish(out, start);
                                     if (t->storable && st->tpl_cache_entries.len < 4096) {
+#ifdef SG_PROFILE
+                                        prof_cache_stored++;
+#endif
                                         TplCacheEntry *e = vec_push_slot(&st->tpl_cache_entries, st->ar);
                                         e->hash = h; e->tpl_idx = (uint32_t)k; e->depth = (uint8_t)(depth + 1);
                                         e->nkeys = nk; e->bytes = span;

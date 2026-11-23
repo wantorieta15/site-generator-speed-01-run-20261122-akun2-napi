@@ -18,6 +18,7 @@ void sys_exit(int code) { sys_call(60, code, 0, 0, 0, 0, 0); __builtin_unreachab
 long sys_open(const char *p, int flags, int mode) { return sys_call(2, (long)p, flags, mode, 0, 0, 0); }
 long sys_read(int fd, void *b, long n) { return sys_call(0, fd, (long)b, n, 0, 0, 0); }
 long sys_write(int fd, const void *b, long n) { return sys_call(1, fd, (long)b, n, 0, 0, 0); }
+long sys_writev(int fd, const void *iov, int count) { return sys_call(20, fd, (long)iov, count, 0, 0, 0); }
 long sys_close(int fd) { return sys_call(3, fd, 0, 0, 0, 0, 0); }
 void *sys_mmap(long n) {
     long r = sys_call(9, 0, n, 3, 0x22, -1, 0);
@@ -30,26 +31,8 @@ void *xmalloc(size_t n) {
 }
 
 /* ---------------- memory primitives (also satisfy gcc codegen) ---------------- */
-void *xmemcpy(void *d, const void *s, size_t n) {
-    uint8_t *dd = d; const uint8_t *ss = s;
-    while (n >= 8) {
-        *(uint64_t *)dd = *(const uint64_t *)ss; dd += 8; ss += 8; n -= 8;
-    }
-    while (n--) *dd++ = *ss++;
-    return d;
-}
-void *xmemset(void *d, int c, size_t n) {
-    uint8_t *dd = d; uint8_t v = (uint8_t)c;
-    uint64_t w = (uint64_t)v * 0x0101010101010101ull;
-    while (n >= 8) { *(uint64_t *)dd = w; dd += 8; n -= 8; }
-    while (n--) *dd++ = v;
-    return d;
-}
-int xmemcmp(const void *a, const void *b, size_t n) {
-    const uint8_t *x = a, *y = b;
-    while (n--) { if (*x != *y) return (int)*x - (int)*y; x++; y++; }
-    return 0;
-}
+/* xmemcpy/xmemset/xmemcmp are static inline in sg.h now; the libc-named
+ * wrappers below keep them (gcc codegen may call memcpy/memset). */
 void *memcpy(void *d, const void *s, size_t n) { return xmemcpy(d, s, n); }
 void *memset(void *d, int c, size_t n) { return xmemset(d, c, n); }
 void *memmove(void *d, const void *s, size_t n) {
@@ -68,38 +51,8 @@ void ar_init(Arena *a, size_t cap) {
     a->len = 0;
     a->cap = cap;
 }
-void ar_push_slice(Arena *a, const uint8_t *p, size_t n) {
-    xmemcpy(a->buf + a->len, p, n);
-    a->len += n;
-}
-void ar_push_span(Arena *a, S s) {
-    /* Source ends at or before the tail (spans created earlier), so the
-     * source region lies entirely before the destination: one copy. */
-    xmemcpy(a->buf + a->len, a->buf + s.off, s.len);
-    a->len += s.len;
-}
-void ar_push_uint(Arena *a, uint64_t v) {
-    uint8_t tmp[20]; int i = 20;
-    if (v == 0) { a->buf[a->len++] = '0'; return; }
-    while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
-    xmemcpy(a->buf + a->len, tmp + i, (size_t)(20 - i));
-    a->len += (size_t)(20 - i);
-}
-void ar_push_int(Arena *a, int64_t n) {
-    if (n == 0) { a->buf[a->len++] = '0'; return; }
-    if (n < 0) {
-        a->buf[a->len++] = '-';
-        ar_push_uint(a, (uint64_t)(-(n + 1)) + 1);
-        return;
-    }
-    ar_push_uint(a, (uint64_t)n);
-}
-S ar_put(Arena *a, const uint8_t *p, size_t n) {
-    uint32_t off = (uint32_t)a->len;
-    xmemcpy(a->buf + a->len, p, n);
-    a->len += n;
-    return (S){off, (uint32_t)n};
-}
+/* ar_push_slice / ar_push_span / ar_push_uint / ar_push_int / ar_put are
+ * static inline in sg.h now. */
 
 /* ---------------- generic vector ---------------- */
 void vec_init(Vec *v, size_t esz) { v->p = 0; v->len = 0; v->cap = 0; v->esz = esz; }
@@ -112,14 +65,6 @@ void vec_reserve(Vec *v, Arena *a, size_t n) {
     v->p = np;
     v->cap = ncap;
 }
-void *vec_push_slot(Vec *v, Arena *a) {
-    vec_reserve(v, a, v->len + 1);
-    void *slot = (uint8_t *)v->p + v->len * v->esz;
-    xmemset(slot, 0, v->esz);
-    v->len++;
-    return slot;
-}
-void *vec_at(Vec *v, size_t i) { return (uint8_t *)v->p + i * v->esz; }
 
 /* Stable mergesort over a Vec's elements. */
 static void ms_merge(uint8_t *a, uint8_t *tmp, size_t esz, size_t lo, size_t mid, size_t hi,
@@ -149,44 +94,8 @@ void vec_sort(Vec *v, Arena *a, void *ctx, int (*cmp)(void *ctx, const void *x, 
 }
 
 /* ---------------- byte buffer (xmalloc-backed) ---------------- */
-void buf_init(Buf *b) { b->p = 0; b->len = 0; b->cap = 0; }
-void buf_reserve(Buf *b, size_t n) {
-    if (n <= b->cap) return;
-    size_t ncap = b->cap ? b->cap * 2 : 256;
-    while (ncap < n) ncap *= 2;
-    uint8_t *np = xmalloc(ncap);
-    if (b->p && b->len) xmemcpy(np, b->p, b->len);
-    b->p = np;
-    b->cap = ncap;
-}
-void buf_put(Buf *b, uint8_t c) {
-    buf_reserve(b, b->len + 1);
-    b->p[b->len++] = c;
-}
-void buf_puts(Buf *b, const uint8_t *p, size_t n) {
-    buf_reserve(b, b->len + n);
-    xmemcpy(b->p + b->len, p, n);
-    b->len += n;
-}
-void buf_putcstr(Buf *b, const char *s) {
-    size_t n = 0; while (s[n]) n++;
-    buf_puts(b, (const uint8_t *)s, n);
-}
-void buf_put_int(Buf *b, int64_t n) {
-    if (n == 0) { buf_put(b, '0'); return; }
-    if (n < 0) {
-        buf_put(b, '-');
-        uint64_t v = (uint64_t)(-(n + 1)) + 1;
-        uint8_t tmp[20]; int i = 20;
-        while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
-        buf_puts(b, tmp + i, (size_t)(20 - i));
-        return;
-    }
-    uint64_t v = (uint64_t)n;
-    uint8_t tmp[20]; int i = 20;
-    while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
-    buf_puts(b, tmp + i, (size_t)(20 - i));
-}
+/* buf_init / buf_reserve / buf_put / buf_puts / buf_putcstr / buf_put_int
+ * are static inline in sg.h now. */
 
 /* ---------------- SSE2 scans ---------------- */
 static inline unsigned mask16(__m128i v) { return (unsigned)_mm_movemask_epi8(v); }

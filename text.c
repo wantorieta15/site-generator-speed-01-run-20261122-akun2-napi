@@ -311,7 +311,10 @@ size_t utf_words_of(const uint8_t *b, size_t n) {
     return count;
 }
 
-void utf_write_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
+/* Slow fallback for the fused writers below: the original
+ * find-next-special + ar_push_slice loop. Used only when the arena
+ * cannot hold the worst case (6 bytes per input byte). */
+static void utf_write_json_escaped_slow(Arena *ar, const uint8_t *bytes, size_t n) {
     static const char *HEX = "0123456789abcdef";
     size_t i = 0;
     while (i < n) {
@@ -337,7 +340,89 @@ void utf_write_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
     }
 }
 
-void utf_write_html_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
+/* Fused JSON escape writer: one SSE scan per 16-byte chunk (needles
+ * hoisted out of the loop), plain spans copied with a single 16-byte
+ * store, escapes written straight to a raw write cursor. This replaces
+ * one find_json_special_sse call + two ar_push_slice calls per special
+ * (280k specials across the practice answers) with ~20 ops per special
+ * and ~10 ops per clean 16-byte chunk. Output is byte-identical to the
+ * slow path: same escape table, same order. */
+void utf_write_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
+    static const char *HEX = "0123456789abcdef";
+    if (ar->len + 16 > ar->cap || n > (ar->cap - ar->len - 16) / 6) {
+        utf_write_json_escaped_slow(ar, bytes, n);
+        return;
+    }
+    __m128i q = _mm_set1_epi8('"');
+    __m128i bs = _mm_set1_epi8('\\');
+    __m128i x80 = _mm_set1_epi8((char)0x80);
+    __m128i lt = _mm_set1_epi8((char)0xa0);
+    uint8_t *wp = ar->buf + ar->len;
+    size_t i = 0;
+    while (i + 16 <= n) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(bytes + i));
+        unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, q))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, bs))
+            | (unsigned)_mm_movemask_epi8(_mm_cmplt_epi8(_mm_xor_si128(chunk, x80), lt));
+        if (m == 0) {
+            _mm_storeu_si128((__m128i *)wp, chunk);
+            wp += 16; i += 16;
+            continue;
+        }
+        size_t j = i;
+        while (m) {
+            unsigned off = (unsigned)__builtin_ctz(m);
+            size_t k = i + off;
+            while (j < k) *wp++ = bytes[j++];
+            uint8_t c = bytes[k];
+            switch (c) {
+                case '"': wp[0] = '\\'; wp[1] = '"'; wp += 2; break;
+                case '\\': wp[0] = '\\'; wp[1] = '\\'; wp += 2; break;
+                case '\n': wp[0] = '\\'; wp[1] = 'n'; wp += 2; break;
+                case '\r': wp[0] = '\\'; wp[1] = 'r'; wp += 2; break;
+                case '\t': wp[0] = '\\'; wp[1] = 't'; wp += 2; break;
+                case 0x08: wp[0] = '\\'; wp[1] = 'b'; wp += 2; break;
+                case 0x0c: wp[0] = '\\'; wp[1] = 'f'; wp += 2; break;
+                default:
+                    wp[0] = '\\'; wp[1] = 'u'; wp[2] = '0'; wp[3] = '0';
+                    wp[4] = (uint8_t)HEX[(c >> 4) & 0xf];
+                    wp[5] = (uint8_t)HEX[c & 0xf];
+                    wp += 6;
+                    break;
+            }
+            j = k + 1;
+            m &= m - 1;
+        }
+        size_t end = i + 16;
+        while (j < end) *wp++ = bytes[j++];
+        i = end;
+    }
+    while (i < n) {
+        uint8_t c = bytes[i];
+        switch (c) {
+            case '"': wp[0] = '\\'; wp[1] = '"'; wp += 2; break;
+            case '\\': wp[0] = '\\'; wp[1] = '\\'; wp += 2; break;
+            case '\n': wp[0] = '\\'; wp[1] = 'n'; wp += 2; break;
+            case '\r': wp[0] = '\\'; wp[1] = 'r'; wp += 2; break;
+            case '\t': wp[0] = '\\'; wp[1] = 't'; wp += 2; break;
+            case 0x08: wp[0] = '\\'; wp[1] = 'b'; wp += 2; break;
+            case 0x0c: wp[0] = '\\'; wp[1] = 'f'; wp += 2; break;
+            default:
+                if (c < 0x20) {
+                    wp[0] = '\\'; wp[1] = 'u'; wp[2] = '0'; wp[3] = '0';
+                    wp[4] = (uint8_t)HEX[(c >> 4) & 0xf];
+                    wp[5] = (uint8_t)HEX[c & 0xf];
+                    wp += 6;
+                } else *wp++ = c;
+                break;
+        }
+        i++;
+    }
+    ar->len = (size_t)(wp - ar->buf);
+}
+
+/* Slow fallback for the fused HTML+JSON writer below. */
+static void utf_write_html_json_escaped_slow(Arena *ar, const uint8_t *bytes, size_t n) {
     static const char *HEX = "0123456789abcdef";
     size_t i = 0;
     while (i < n) {
@@ -365,4 +450,97 @@ void utf_write_html_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
         }
         i = (size_t)j + 1;
     }
+}
+
+/* Fused HTML+JSON escape writer: same structure as the JSON writer
+ * above (one SSE scan per 16-byte chunk, raw write cursor). Byte-
+ * identical output to the slow path. */
+void utf_write_html_json_escaped(Arena *ar, const uint8_t *bytes, size_t n) {
+    static const char *HEX = "0123456789abcdef";
+    if (ar->len + 16 > ar->cap || n > (ar->cap - ar->len - 16) / 6) {
+        utf_write_html_json_escaped_slow(ar, bytes, n);
+        return;
+    }
+    __m128i amp = _mm_set1_epi8('&');
+    __m128i lt = _mm_set1_epi8('<');
+    __m128i gt = _mm_set1_epi8('>');
+    __m128i q = _mm_set1_epi8('"');
+    __m128i sq = _mm_set1_epi8('\'');
+    __m128i bs = _mm_set1_epi8('\\');
+    __m128i x80 = _mm_set1_epi8((char)0x80);
+    __m128i lo = _mm_set1_epi8((char)0xa0);
+    uint8_t *wp = ar->buf + ar->len;
+    size_t i = 0;
+    while (i + 16 <= n) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(bytes + i));
+        unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, amp))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, lt))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, gt))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, q))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, sq))
+            | (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, bs))
+            | (unsigned)_mm_movemask_epi8(_mm_cmplt_epi8(_mm_xor_si128(chunk, x80), lo));
+        if (m == 0) {
+            _mm_storeu_si128((__m128i *)wp, chunk);
+            wp += 16; i += 16;
+            continue;
+        }
+        size_t j = i;
+        while (m) {
+            unsigned off = (unsigned)__builtin_ctz(m);
+            size_t k = i + off;
+            while (j < k) *wp++ = bytes[j++];
+            uint8_t c = bytes[k];
+            switch (c) {
+                case '&': wp[0]='&'; wp[1]='a'; wp[2]='m'; wp[3]='p'; wp[4]=';'; wp += 5; break;
+                case '<': wp[0]='&'; wp[1]='l'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+                case '>': wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+                case '"': wp[0]='&'; wp[1]='q'; wp[2]='u'; wp[3]='o'; wp[4]='t'; wp[5]=';'; wp += 6; break;
+                case '\'': wp[0]='&'; wp[1]='#'; wp[2]='3'; wp[3]='9'; wp[4]=';'; wp += 5; break;
+                case '\\': wp[0] = '\\'; wp[1] = '\\'; wp += 2; break;
+                case '\n': wp[0] = '\\'; wp[1] = 'n'; wp += 2; break;
+                case '\r': wp[0] = '\\'; wp[1] = 'r'; wp += 2; break;
+                case '\t': wp[0] = '\\'; wp[1] = 't'; wp += 2; break;
+                case 0x08: wp[0] = '\\'; wp[1] = 'b'; wp += 2; break;
+                case 0x0c: wp[0] = '\\'; wp[1] = 'f'; wp += 2; break;
+                default:
+                    wp[0] = '\\'; wp[1] = 'u'; wp[2] = '0'; wp[3] = '0';
+                    wp[4] = (uint8_t)HEX[(c >> 4) & 0xf];
+                    wp[5] = (uint8_t)HEX[c & 0xf];
+                    wp += 6;
+                    break;
+            }
+            j = k + 1;
+            m &= m - 1;
+        }
+        size_t end = i + 16;
+        while (j < end) *wp++ = bytes[j++];
+        i = end;
+    }
+    while (i < n) {
+        uint8_t c = bytes[i];
+        switch (c) {
+            case '&': wp[0]='&'; wp[1]='a'; wp[2]='m'; wp[3]='p'; wp[4]=';'; wp += 5; break;
+            case '<': wp[0]='&'; wp[1]='l'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+            case '>': wp[0]='&'; wp[1]='g'; wp[2]='t'; wp[3]=';'; wp += 4; break;
+            case '"': wp[0]='&'; wp[1]='q'; wp[2]='u'; wp[3]='o'; wp[4]='t'; wp[5]=';'; wp += 6; break;
+            case '\'': wp[0]='&'; wp[1]='#'; wp[2]='3'; wp[3]='9'; wp[4]=';'; wp += 5; break;
+            case '\\': wp[0] = '\\'; wp[1] = '\\'; wp += 2; break;
+            case '\n': wp[0] = '\\'; wp[1] = 'n'; wp += 2; break;
+            case '\r': wp[0] = '\\'; wp[1] = 'r'; wp += 2; break;
+            case '\t': wp[0] = '\\'; wp[1] = 't'; wp += 2; break;
+            case 0x08: wp[0] = '\\'; wp[1] = 'b'; wp += 2; break;
+            case 0x0c: wp[0] = '\\'; wp[1] = 'f'; wp += 2; break;
+            default:
+                if (c < 0x20) {
+                    wp[0] = '\\'; wp[1] = 'u'; wp[2] = '0'; wp[3] = '0';
+                    wp[4] = (uint8_t)HEX[(c >> 4) & 0xf];
+                    wp[5] = (uint8_t)HEX[c & 0xf];
+                    wp += 6;
+                } else *wp++ = c;
+                break;
+        }
+        i++;
+    }
+    ar->len = (size_t)(wp - ar->buf);
 }

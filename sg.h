@@ -25,12 +25,39 @@ void sys_exit(int code);
 long sys_open(const char *p, int flags, int mode);
 long sys_read(int fd, void *b, long n);
 long sys_write(int fd, const void *b, long n);
+long sys_writev(int fd, const void *iov, int count);
 long sys_close(int fd);
 void *sys_mmap(long n);
 void *xmalloc(size_t n);
-void *xmemcpy(void *d, const void *s, size_t n);
-void *xmemset(void *d, int c, size_t n);
-int xmemcmp(const void *a, const void *b, size_t n);
+/* Small memory/buffer helpers are static inline so the hot paths
+ * (markdown, template render, JSON escape) pay no cross-TU call per
+ * chunk: the old out-of-line buf_puts/ar_push_slice cost a call +
+ * reserve check per use, ~300k calls per build. xmemcpy moves 16
+ * bytes per iteration with unaligned SSE loads/stores. */
+static inline void *xmemcpy(void *d, const void *s, size_t n) {
+    uint8_t *dd = d; const uint8_t *ss = s;
+    while (n >= 16) {
+        _mm_storeu_si128((__m128i *)dd, _mm_loadu_si128((const __m128i *)ss));
+        dd += 16; ss += 16; n -= 16;
+    }
+    while (n >= 8) {
+        *(uint64_t *)dd = *(const uint64_t *)ss; dd += 8; ss += 8; n -= 8;
+    }
+    while (n--) *dd++ = *ss++;
+    return d;
+}
+static inline void *xmemset(void *d, int c, size_t n) {
+    uint8_t *dd = d; uint8_t v = (uint8_t)c;
+    uint64_t w = (uint64_t)v * 0x0101010101010101ull;
+    while (n >= 8) { *(uint64_t *)dd = w; dd += 8; n -= 8; }
+    while (n--) *dd++ = v;
+    return d;
+}
+static inline int xmemcmp(const void *a, const void *b, size_t n) {
+    const uint8_t *x = a, *y = b;
+    while (n--) { if (*x != *y) return (int)*x - (int)*y; x++; y++; }
+    return 0;
+}
 void *memcpy(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);
 void *memmove(void *d, const void *s, size_t n);
@@ -47,34 +74,105 @@ typedef struct {
 } Arena;
 
 void ar_init(Arena *a, size_t cap);
+static inline uint64_t fnv1a_bytes(const uint8_t *p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
 static inline uint8_t *ar_get(Arena *a, S s) { return a->buf + s.off; }
 static inline uint32_t ar_begin(Arena *a) { return (uint32_t)a->len; }
 static inline S ar_finish(Arena *a, uint32_t start) { return (S){start, (uint32_t)(a->len - start)}; }
 static inline void ar_push(Arena *a, uint8_t c) { a->buf[a->len++] = c; }
 static inline void *ar_alloc(Arena *a, size_t n) { void *p = a->buf + a->len; a->len += n; return p; }
-void ar_push_slice(Arena *a, const uint8_t *p, size_t n);
-void ar_push_span(Arena *a, S s);
-void ar_push_uint(Arena *a, uint64_t v);
-void ar_push_int(Arena *a, int64_t n);
-S ar_put(Arena *a, const uint8_t *p, size_t n);
+static inline void ar_push_slice(Arena *a, const uint8_t *p, size_t n) {
+    xmemcpy(a->buf + a->len, p, n);
+    a->len += n;
+}
+static inline void ar_push_span(Arena *a, S s) {
+    /* Source ends at or before the tail (spans created earlier), so the
+     * source region lies entirely before the destination: one copy. */
+    xmemcpy(a->buf + a->len, a->buf + s.off, s.len);
+    a->len += s.len;
+}
+static inline void ar_push_uint(Arena *a, uint64_t v) {
+    uint8_t tmp[20]; int i = 20;
+    if (v == 0) { a->buf[a->len++] = '0'; return; }
+    while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
+    xmemcpy(a->buf + a->len, tmp + i, (size_t)(20 - i));
+    a->len += (size_t)(20 - i);
+}
+static inline void ar_push_int(Arena *a, int64_t n) {
+    if (n == 0) { a->buf[a->len++] = '0'; return; }
+    if (n < 0) {
+        a->buf[a->len++] = '-';
+        ar_push_uint(a, (uint64_t)(-(n + 1)) + 1);
+        return;
+    }
+    ar_push_uint(a, (uint64_t)n);
+}
+static inline S ar_put(Arena *a, const uint8_t *p, size_t n) {
+    uint32_t off = (uint32_t)a->len;
+    xmemcpy(a->buf + a->len, p, n);
+    a->len += n;
+    return (S){off, (uint32_t)n};
+}
 
 /* ---------------- generic vector ---------------- */
 typedef struct { void *p; size_t len; size_t cap; size_t esz; } Vec;
 void vec_init(Vec *v, size_t esz);
 void vec_reserve(Vec *v, Arena *a, size_t n);
-void *vec_push_slot(Vec *v, Arena *a);
-void *vec_at(Vec *v, size_t i);
+static inline void *vec_at(Vec *v, size_t i) { return (uint8_t *)v->p + i * v->esz; }
+static inline void *vec_push_slot(Vec *v, Arena *a) {
+    if (v->len >= v->cap) vec_reserve(v, a, v->len + 1);
+    void *slot = (uint8_t *)v->p + v->len * v->esz;
+    xmemset(slot, 0, v->esz);
+    v->len++;
+    return slot;
+}
 void vec_sort(Vec *v, Arena *a, void *ctx, int (*cmp)(void *ctx, const void *x, const void *y));
 static inline void vec_clear(Vec *v) { v->len = 0; }
 
 /* ---------------- byte buffer ---------------- */
 typedef struct { uint8_t *p; size_t len; size_t cap; } Buf;
-void buf_init(Buf *b);
-void buf_reserve(Buf *b, size_t n);
-void buf_put(Buf *b, uint8_t c);
-void buf_puts(Buf *b, const uint8_t *p, size_t n);
-void buf_putcstr(Buf *b, const char *s);
-void buf_put_int(Buf *b, int64_t n);
+static inline void buf_init(Buf *b) { b->p = 0; b->len = 0; b->cap = 0; }
+static inline void buf_reserve(Buf *b, size_t n) {
+    if (n <= b->cap) return;
+    size_t ncap = b->cap ? b->cap * 2 : 256;
+    while (ncap < n) ncap *= 2;
+    uint8_t *np = xmalloc(ncap);
+    if (b->p && b->len) xmemcpy(np, b->p, b->len);
+    b->p = np;
+    b->cap = ncap;
+}
+static inline void buf_put(Buf *b, uint8_t c) {
+    buf_reserve(b, b->len + 1);
+    b->p[b->len++] = c;
+}
+static inline void buf_puts(Buf *b, const uint8_t *p, size_t n) {
+    buf_reserve(b, b->len + n);
+    xmemcpy(b->p + b->len, p, n);
+    b->len += n;
+}
+static inline void buf_putcstr(Buf *b, const char *s) {
+    size_t n = 0; while (s[n]) n++;
+    buf_puts(b, (const uint8_t *)s, n);
+}
+static inline void buf_put_int(Buf *b, int64_t n) {
+    if (n == 0) { buf_put(b, '0'); return; }
+    if (n < 0) {
+        buf_put(b, '-');
+        uint64_t v = (uint64_t)(-(n + 1)) + 1;
+        uint8_t tmp[20]; int i = 20;
+        while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
+        buf_puts(b, tmp + i, (size_t)(20 - i));
+        return;
+    }
+    uint64_t v = (uint64_t)n;
+    uint8_t tmp[20]; int i = 20;
+    while (v > 0) { tmp[--i] = (uint8_t)('0' + v % 10); v /= 10; }
+    buf_puts(b, tmp + i, (size_t)(20 - i));
+}
 static inline void buf_clear(Buf *b) { b->len = 0; }
 
 /* ---------------- SSE2 scans ---------------- */
@@ -278,6 +376,14 @@ void tpl_cache_init(State *st, Arena *ar);
 V tpl_eval_slot(State *st, Frame *frames, size_t nframes, Slot *slot);
 void tpl_render(State *st, Vec *templates, Vec *segs, Frame *frames, size_t *nframes,
                 Arena *out, Buf *scratch, uint32_t depth);
+/* Output segments for writev: a cache hit is recorded as (offset in `out`
+ * where its bytes belong, span of the already-rendered bytes in `out`)
+ * instead of copying the bytes into `out`; the final write gathers them
+ * with writev. Falls back to copying if the list is full. */
+typedef struct { uint32_t off; S span; } OutSeg;
+bool tpl_outseg_try(uint32_t off, S span);
+size_t tpl_outseg_count(void);
+const OutSeg *tpl_outseg_list(void);
 
 /* ---------------- markdown ---------------- */
 typedef struct {
@@ -288,6 +394,10 @@ typedef struct {
     Buf *path_buf; /* reused scratch for resolve_path (avoids 1 mmap per link) */
     Buf *item_buf; /* reused scratch for the current list item's text */
     Buf *item_scratch; /* reused scratch for accumulating a list item */
+    uint32_t *path_hash; /* open addressing; 0 empty, (i+1) page i, 0x80000000|(j+1) static j */
+    size_t path_hash_mask;
+    const uint8_t *dir_parts[16]; size_t dir_plens[16]; size_t ndir_parts;
+    uint8_t dir_parts_ok; /* dir pre-split once per page; 0 = fall back to slow resolve_path */
 } LinkEnv;
 bool md_render(Arena *ar, S src, LinkEnv *env, StrMap *slug_cache,
                Buf *scratch, Buf *tmp, Buf *text_tmp,

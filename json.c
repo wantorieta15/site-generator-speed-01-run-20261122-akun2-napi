@@ -162,6 +162,16 @@ static bool p_parse_string_escaped(P *p, size_t start, size_t first_esc, S *out)
                 return true;
             }
             if (c == '\\') {
+                /* Inline the common escapes (the bodies are full of \n);
+                 * only the rare ones go through p_unescape_one. */
+                if (r + 1 < end) {
+                    uint8_t e = buf[r+1];
+                    if (e == 'n') { buf[w++] = '\n'; r += 2; continue; }
+                    if (e == '"') { buf[w++] = '"'; r += 2; continue; }
+                    if (e == '\\') { buf[w++] = '\\'; r += 2; continue; }
+                    if (e == 't') { buf[w++] = '\t'; r += 2; continue; }
+                    if (e == 'r') { buf[w++] = '\r'; r += 2; continue; }
+                }
                 if (!p_unescape_one(buf, end, &r, &w)) return false;
             } else {
                 buf[w++] = c; r++;
